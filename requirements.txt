@@ -1,0 +1,6 @@
+numpy
+scipy
+h5py
+tensorflow[and-cuda]   # on a CPU-only machine use plain `tensorflow`
+bbhx                   # waveform generation; GPU build: bbhx-cuda12x
+lisaanalysistools
