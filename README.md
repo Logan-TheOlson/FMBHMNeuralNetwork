@@ -16,7 +16,7 @@ It extends the paper's single-channel (A) network to take A and E stacked as cha
 
 ## Data
 Download the LDC2 Spritz training files (`LDC2_spritz_mbhb1_training_v2.h5`, etc.) from the
-LISA Data Challenge and place them in `data/`. `dataset.py` needs `mbhb1` to measure the noise PSD.
+[LISA Data Challenge](https://zenodo.org/records/7436568) and place them in `data/`. `dataset.py` needs `mbhb1` to measure the noise PSD.
 
 ## Usage (run from the repo root)
 ```
