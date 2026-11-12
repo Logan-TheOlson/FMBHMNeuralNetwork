@@ -14,6 +14,9 @@ import tensorflow as tf
 from detection_cnn import build_detection_cnn
 
 EPOCHS = int(sys.argv[1]) if len(sys.argv) > 1 else 8
+TRAIN = sys.argv[2] if len(sys.argv) > 2 else "data/train_pilot.npz"
+TEST = sys.argv[3] if len(sys.argv) > 3 else "data/test_pilot.npz"
+OUT = sys.argv[4] if len(sys.argv) > 4 else "results/compare_results.json"
 SEED = 0
 
 
@@ -37,8 +40,31 @@ def run(name, channels, xtr, ytr, xte, yte, meta_te):
     model.compile(tf.keras.optimizers.Adam(1e-3), loss="mse")
     w = np.where(ytr > 0, (ytr <= 0).sum() / max((ytr > 0).sum(), 1), 1.0).astype("float32")
     sl = list(channels)
-    model.fit(xtr[..., sl].astype("float32"), ytr, sample_weight=w, batch_size=64,
-              epochs=EPOCHS, validation_split=0.1, shuffle=True, verbose=2)
+    # Stream batches so only one batch at a time goes to the GPU (the full
+    # array does not fit in GPU memory for large training sets).
+    ytr = ytr.astype("float32")
+    perm = np.random.default_rng(SEED).permutation(len(xtr))
+    n_val = len(xtr) // 10
+    va_idx, tr_idx = np.sort(perm[:n_val]), perm[n_val:]
+    shape = (None, xtr.shape[1], xtr.shape[2], len(sl))
+    bs = 64
+
+    def make_ds(idx, shuffle, weighted):
+        rng = np.random.default_rng(SEED)
+
+        def gen():
+            order = rng.permutation(idx) if shuffle else idx
+            for i in range(0, len(order), bs):
+                j = np.sort(order[i:i + bs])
+                xb = xtr[j][..., sl].astype("float32")
+                yield (xb, ytr[j], w[j]) if weighted else (xb, ytr[j])
+        sig = (tf.TensorSpec(shape, tf.float32), tf.TensorSpec((None,), tf.float32))
+        if weighted:
+            sig += (tf.TensorSpec((None,), tf.float32),)
+        return tf.data.Dataset.from_generator(gen, output_signature=sig).prefetch(2)
+
+    model.fit(make_ds(tr_idx, True, True), validation_data=make_ds(va_idx, False, False),
+              epochs=EPOCHS, verbose=2)
     out = model.predict(xte[..., sl].astype("float32"), batch_size=128, verbose=0).ravel()
     pos = yte > 0
     res = dict(model=name, auc=float(auc(out, pos)),
@@ -54,13 +80,13 @@ def run(name, channels, xtr, ytr, xte, yte, meta_te):
 
 
 def main():
-    xtr, ytr, _ = load("data/train_pilot.npz")
-    xte, yte, mte = load("data/test_pilot.npz")
+    xtr, ytr, _ = load(TRAIN)
+    xte, yte, mte = load(TEST)
     print(f"train {xtr.shape}, positives {(ytr > 0).mean():.1%}; "
           f"test {xte.shape}, positives {(yte > 0).mean():.1%}", flush=True)
     results = [run("A only", [0], xtr, ytr, xte, yte, mte),
                run("A + E", [0, 1], xtr, ytr, xte, yte, mte)]
-    json.dump(results, open("results/compare_results.json", "w"), indent=1)
+    json.dump(results, open(OUT, "w"), indent=1)
 
 
 if __name__ == "__main__":
