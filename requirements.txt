@@ -2,5 +2,8 @@ numpy
 scipy
 h5py
 tensorflow[and-cuda]   # on a CPU-only machine use plain `tensorflow`
-bbhx                   # waveform generation; GPU build: bbhx-cuda12x
 lisaanalysistools
+# Waveforms: install exactly ONE of these (they provide the same `bbhx` package).
+bbhx                   # CPU only
+# bbhx-cuda12x         # NVIDIA GPU build, also install cupy-cuda12x below
+# cupy-cuda12x         # needed for `dataset.py --device cuda`

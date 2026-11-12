@@ -43,17 +43,23 @@ def stack_channels(spectrograms, channels=CHANNELS):
     return np.stack([spectrograms[c] for c in channels], axis=-1)
 
 
-def build_detection_cnn(height, width, n_channels=len(CHANNELS)):
+def build_detection_cnn(height, width, n_channels=len(CHANNELS), filters=(32, 64, 64),
+                        convs_per_block=2, dense=(64, 64, 32), dropout=0.0):
+    """Defaults are the paper's architecture; the arguments are the knobs swept
+    in train_compare.py. `filters` has one entry per conv block (each ends in a
+    2x2 max-pool), `dense` one per hidden Dense layer."""
     inputs = keras.Input(shape=(height, width, n_channels))
     x = inputs
-    for filters in (32, 64, 64):
-        for _ in range(2):
-            x = layers.Conv2D(filters, 3, padding="same", activation="relu")(x)
+    for f in filters:
+        for _ in range(convs_per_block):
+            x = layers.Conv2D(f, 3, padding="same", activation="relu")(x)
         x = layers.MaxPooling2D(pool_size=2, strides=2)(x)
     x = layers.Flatten()(x)
-    for units in (64, 64, 32):
+    for units in dense:
         x = layers.Dense(units, activation="relu")(x)
-    outputs = layers.Dense(1)(x)  # linear: sign = detection
+        if dropout:
+            x = layers.Dropout(dropout)(x)
+    outputs = layers.Dense(1, dtype="float32")(x)  # linear: sign = detection
     return keras.Model(inputs, outputs, name=f"detection_cnn_{n_channels}ch")
 
 

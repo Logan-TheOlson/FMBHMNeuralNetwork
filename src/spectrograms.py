@@ -17,38 +17,76 @@ def to_ae(x, y, z):
     return (z - x) / np.sqrt(2), (x - 2 * y + z) / np.sqrt(6)
 
 
-def power_image(x, dt, height=128, width=128, nperseg=2048, fmin=3e-4, fmax=0.1):
-    """x: 1-D NaN-free series -> (height, width) linear power on log-spaced rows."""
-    hop = (len(x) - nperseg) // (width - 1)
-    starts = np.arange(width) * hop
-    segs = x[starts[:, None] + np.arange(nperseg)[None, :]]
-    segs = segs - segs.mean(axis=1, keepdims=True)
-    win = np.hanning(nperseg)
-    power = np.abs(np.fft.rfft(segs * win, axis=1)) ** 2          # (width, nfreq)
-    f = np.fft.rfftfreq(nperseg, dt)
+_ROWS_CACHE = {}
 
-    # log-spaced frequency rows: mean of FFT bins inside each row, or an
-    # interpolation where a row is narrower than one FFT bin (low f).
-    edges = np.geomspace(fmin, fmax, height + 1)
-    centres = np.sqrt(edges[:-1] * edges[1:])
-    idx = np.searchsorted(f, edges)
-    img = np.empty((height, width))
-    for i in range(height):
-        lo, hi = idx[i], idx[i + 1]
-        if hi > lo:
-            img[i] = power[:, lo:hi].mean(axis=1)
-        else:
-            j = np.clip(np.searchsorted(f, centres[i]), 1, len(f) - 1)
-            w = (centres[i] - f[j - 1]) / (f[j] - f[j - 1])
-            img[i] = (1 - w) * power[:, j - 1] + w * power[:, j]
-    return img
+
+def _row_matrix(nperseg, dt, height, fmin, fmax, xp):
+    """(nfreq, height) matrix that turns FFT power into log-spaced rows.
+
+    A row averages the FFT bins inside it; where a row is narrower than one
+    FFT bin (low f) it linearly interpolates between the two nearest bins.
+    """
+    key = (nperseg, dt, height, fmin, fmax, xp.__name__)
+    if key not in _ROWS_CACHE:
+        f = np.fft.rfftfreq(nperseg, dt)
+        edges = np.geomspace(fmin, fmax, height + 1)
+        centres = np.sqrt(edges[:-1] * edges[1:])
+        idx = np.searchsorted(f, edges)
+        m = np.zeros((len(f), height))
+        for i in range(height):
+            lo, hi = idx[i], idx[i + 1]
+            if hi > lo:
+                m[lo:hi, i] = 1.0 / (hi - lo)
+            else:
+                j = np.clip(np.searchsorted(f, centres[i]), 1, len(f) - 1)
+                w = (centres[i] - f[j - 1]) / (f[j] - f[j - 1])
+                m[j - 1, i] = 1 - w
+                m[j, i] = w
+        if xp is np:      # almost all zeros: sparse is ~10x faster than dense on CPU
+            from scipy.sparse import csr_matrix
+            _ROWS_CACHE[key] = csr_matrix(m.T)                    # (height, nfreq)
+        else:             # GPU: a dense GEMM is fast and needs no sparse support
+            _ROWS_CACHE[key] = xp.asarray(m)                      # (nfreq, height)
+    return _ROWS_CACHE[key]
+
+
+def power_images(x, dt, height=128, width=128, nperseg=2048, fmin=3e-4, fmax=0.1,
+                 xp=np):
+    """x: (B, n) NaN-free series -> (B, height, width) linear power on log-spaced rows.
+
+    `xp` is numpy or cupy; x must already be an array of that module.
+    """
+    n = x.shape[1]
+    hop = (n - nperseg) // (width - 1)
+    starts = np.arange(width) * hop
+    segs = x[:, starts[:, None] + np.arange(nperseg)[None, :]]     # (B, width, nperseg)
+    segs = segs - segs.mean(axis=2, keepdims=True)
+    win = xp.asarray(np.hanning(nperseg))
+    power = xp.abs(xp.fft.rfft(segs * win, axis=2)) ** 2           # (B, width, nfreq)
+    m = _row_matrix(nperseg, dt, height, fmin, fmax, xp)
+    if xp is np:
+        flat = power.reshape(-1, power.shape[-1])
+        rows = np.asarray(m @ flat.T).T.reshape(power.shape[0], width, height)
+    else:
+        rows = power @ m                                           # (B, width, height)
+    return rows.transpose(0, 2, 1)
+
+
+def power_image(x, dt, **kw):
+    """x: 1-D NaN-free series -> (height, width) linear power on log-spaced rows."""
+    return power_images(x[None], dt, **kw)[0]
+
+
+def normalize_batch(power, xp=np):
+    """(B, H, W) linear power -> whitened log images, unit std each (network input)."""
+    img = xp.log10(power + 1e-300)
+    img = img - xp.median(img, axis=2, keepdims=True)              # whiten rows
+    return (img / img.std(axis=(1, 2), keepdims=True)).astype(xp.float32)
 
 
 def normalize(power):
     """Linear power image -> whitened log image, unit std (the network input)."""
-    img = np.log10(power + 1e-300)
-    img -= np.median(img, axis=1, keepdims=True)                   # whiten rows
-    return (img / img.std()).astype(np.float32)
+    return normalize_batch(power[None])[0]
 
 
 def spectrogram(x, dt, **kw):
